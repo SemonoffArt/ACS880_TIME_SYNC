@@ -55,6 +55,7 @@ ProfiBus (модуль ПЧ FPBA) обмен ПЛК с ПЧ состоит из 
 ## Железо
 FC блок создан и тестировался под ПЛК S7 400 в Step7 v5.5 +SP4.
 Синхронизация с ПЧ ABB ACS880 c управлением по ProfiBus и ProfiNet.
+-------
 
 ![FC](img/ScrnShot1.png)
 ![FC2](img/ScrnShot2.png)
