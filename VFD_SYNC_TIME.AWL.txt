@@ -1,0 +1,599 @@
+FUNCTION "VFD_SYNC_TIME" : VOID
+TITLE =Блок синхронизации времени с ПЧ ABB ACS880 V2.1
+//ВВОД:
+//--------
+//OUTREF    - Адрес QW омена ПЧ прописанный в HW и передаваемый адаптер блоку;
+//FUNCTYPE  - тип сети 0 - ProfiBus; 1- ProfiNet;
+//           (в ProfiBus первые 8 байт ацикличный обмен PKW, учитываются в 
+//            вычислении адреса PZD слова); 
+//OPTIONS   - 1- без записи в Q память (тестовый режим);
+//NUM_PZD   - № слова в PZD обмене, первые 3 слова используются в управлении      
+//            ПЧ, 5-12 свободны;
+//СYear     - год. 90-99 -> 1990 - 1999; 00-89 -> 2000 - 2089;  
+//CMonth    - текущий месяц;
+//CDay      - текущий день;
+//СHour     - текущий полный час;
+//СMin      - текущая полная минута;
+//CSec      - текущая секунда.
+//
+//ВЫВОД:
+//--------
+//DAYS      - кол-во дней с 01.01.1980;
+//MIN       - кол-во минут с начала суток;
+//ADDR      - расчётный адрес указанного PZD слова. 
+//
+//Описание решения:
+//--------
+//Один из способов синхронизации времени ПЧ
+//Запись в параметры ПЧ:
+// 96.24 колличество дней с 01.01.1980;
+// 96.25 колличество минут с начала суток;
+// 96.26 колличество милисекунд с начала минуты.
+//ПЧ раз в минуту проверяет данные параметри и если они изменились обновляет по 
+//ним внутренние часы, 
+//т.е. если  96.25  задать 60, то часы отобразят 1:00 и далее будут идти от 
+//данной уставки до следующего изменения значения параметра. Сбой связи с 
+//частотником не влияет на работу, часы продолжают идти с момента (времени) 
+//последней синхронизации.
+//Парамет 96.24 содержит устанавливаему дату в днях с 01.01.1980
+//
+//ProfiBus (модуль ПЧ FPBA) обмен ПЛК с ПЧ состоит из 2х частей: 
+// 1) первые 4 слова PKW - ацикличный обмен, где каждую итерацию ПЛК 
+//    запрашивает/записывает значение одного параметра по его номеру;
+// 2) 12 слов PZD (в случае PPO7) - постоянно отправляются в ПЧ, принимаются ПЛК. 
+// 
+//    Для управления, в посылке от ПЛК к ПЧ, используются первые 4 слова,
+//    с 6 -по 12 свободны. 
+//
+//В ProfiNet (модуль ПЧ FENA) нет PKW части.
+//
+//Для синхронизации времени можно использовать свободные PZD слова 5-12.
+//Далее в примере используются слова 10-12.
+//
+//Со стороны ПЧ:
+//   - привязать данные приходящие в 10 слове в ПЧ с параметром текущей даты, для 
+//     этого в  53.10 выбрать параметр 96.24;
+// 
+//   - привязать данные приходящие в 11 слове в ПЧ с параметром времени (минуты   
+// 
+//     с начала суток), для этого в  53.11 выбрать параметр 96.25.
+//   
+//   - привязать данные приходящие в 12 слове в ПЧ с параметром времени          
+//     (милисекунды текущей минуты), для этого в  53.12 выбрать параметр 96.26.
+//
+//Со стороны ПЛК, после адаптер блока, добавить данную функцию, параметрировать:
+//   - OUTREF    - указать адрес QW обмена с ПЧ;
+//   - FUNCTYPE  - 0 - ProfiBus; 1 - ProfiNet;
+//   - NUM_PZD   - 10;
+//   - CYear     - текущий год
+//   - CMonth    - текущий месяц
+//   - CDay      - текущий день
+//   - CHour     - текущий полный час;
+//   - СMin      - текущая полная минута;
+//   - СSec      - текущая секунда в минуте;
+//--------------------------------------------------------------------------
+//Автор: Семёнов А.А 23.04.2018
+//
+VERSION : 2.0
+
+
+VAR_INPUT
+  OUTREF : INT ;	//Адрес обмена с ПЧ
+  FUNCTYPE : INT ;	//0-PB; 1-PN.
+  OPTIONS : INT ;	//1- без записи в Q память (тестовый режим);
+  NUM_PZD : INT ;	//Номер слова в обмене с ПЧ (6-10)
+  CYear : INT ;	//Год 90-99 -> 1990-1999; 00 - 89 ->2000 - 2089
+  CMonth : INT ;	//Текущий месяц
+  CDay : INT ;	//Текущий день
+  CHour : INT ;	//Текущий час
+  CMin : INT ;	//Текущая минута
+  CSec : INT ;	//Текущая секунда
+END_VAR
+VAR_OUTPUT
+  DAYS : INT ;	//Кол-во дней с 01.01.1980
+  MIN : INT ;	//Кол-во мин с нач суток
+  ADDR : INT ;	//Адрес ячейки обмена
+END_VAR
+VAR_TEMP
+  aOff : BOOL ;	//Always off
+  aOn : BOOL ;	//Always on
+  dummyBool : BOOL ;	
+  PB_Mode : BOOL ;	//ProfiBus
+  PN_Mode : BOOL ;	//ProfiNet 
+  test_Mode : BOOL ;	//Режим без записи в Q память
+  lMinInDay : INT ;	//Колличество прошедшиших минут с 00:00
+  dummyInt : INT ;	
+  lcYear : INT ;	//Текущий год
+  lcMonth : INT ;	//Текущий месяц
+  lcDay : INT ;	//Текущий день
+  lcHour : INT ;	//Текущий час
+  lcMin : INT ;	//Текущая минута
+  lcSec : INT ;	//Текущая секунда
+  lcmSec : INT ;	//Текущая милисекунда
+  lNumPZD : INT ;	//Номер слова в PPO обмене 3-12
+  lOUTREF : INT ;	
+  lDT : DATE_AND_TIME ;	
+  lDaysD : DATE ;	
+  lDays : INT ;	//Кол-во дней с 01.01.1980
+END_VAR
+BEGIN
+NETWORK
+TITLE =
+
+      AN    #aOff; 
+      =     #aOn; 
+NETWORK
+TITLE =Параметры и опции
+//FUNCTYPE = 0 - ProfiBus; 1-ProfiNet.
+//OPTIONS  = 1 - Режим отладки без записи в Q память. 
+      A(    ; 
+      L     #FUNCTYPE; 
+      L     1; 
+      ==I   ; 
+      )     ; 
+      =     #PN_Mode; 
+      A     #PN_Mode; 
+      O(    ; 
+      A(    ; 
+      L     #FUNCTYPE; 
+      L     0; 
+      ==I   ; 
+      )     ; 
+      =     #PB_Mode; 
+      A     #PB_Mode; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #OPTIONS; 
+      L     1; 
+      ==I   ; 
+      )     ; 
+      =     #test_Mode; 
+      A     #test_Mode; 
+      )     ; 
+      =     #dummyBool; 
+NETWORK
+TITLE =Копируем ввод в лакальные переменные
+
+      A(    ; 
+      A(    ; 
+      A(    ; 
+      A(    ; 
+      A(    ; 
+      A(    ; 
+      A(    ; 
+      L     #CHour; 
+      T     #lcHour; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+      A     BR; 
+      )     ; 
+      JNB   _001; 
+      L     #CMin; 
+      T     #lcMin; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_001: A     BR; 
+      )     ; 
+      JNB   _002; 
+      L     #NUM_PZD; 
+      T     #lNumPZD; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_002: A     BR; 
+      )     ; 
+      JNB   _003; 
+      L     #OUTREF; 
+      T     #lOUTREF; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_003: A     BR; 
+      )     ; 
+      JNB   _004; 
+      L     #CYear; 
+      T     #lcYear; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_004: A     BR; 
+      )     ; 
+      JNB   _005; 
+      L     #CMonth; 
+      T     #lcMonth; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_005: A     BR; 
+      )     ; 
+      JNB   _006; 
+      L     #CDay; 
+      T     #lcDay; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_006: A     BR; 
+      )     ; 
+      JNB   _007; 
+      L     #CSec; 
+      T     #lcSec; 
+_007: NOP   0; 
+NETWORK
+TITLE =Проверка на валиднность ввода
+
+      O(    ; 
+      A(    ; 
+      L     #lcHour; 
+      L     23; 
+      >I    ; 
+      )     ; 
+      JNB   _008; 
+      L     23; 
+      T     #lcHour; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_008: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcHour; 
+      L     0; 
+      <I    ; 
+      )     ; 
+      JNB   _009; 
+      L     0; 
+      T     #lcHour; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_009: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcMin; 
+      L     59; 
+      >I    ; 
+      )     ; 
+      JNB   _00a; 
+      L     59; 
+      T     #lcMin; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_00a: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcMin; 
+      L     0; 
+      <I    ; 
+      )     ; 
+      JNB   _00b; 
+      L     0; 
+      T     #lcMin; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_00b: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lNumPZD; 
+      L     10; 
+      >I    ; 
+      )     ; 
+      JNB   _00c; 
+      L     10; 
+      T     #lNumPZD; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_00c: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lNumPZD; 
+      L     6; 
+      <I    ; 
+      )     ; 
+      JNB   _00d; 
+      L     6; 
+      T     #lNumPZD; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_00d: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcYear; 
+      L     99; 
+      >I    ; 
+      )     ; 
+      JNB   _00e; 
+      L     99; 
+      T     #lcYear; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_00e: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcYear; 
+      L     0; 
+      <I    ; 
+      )     ; 
+      JNB   _00f; 
+      L     0; 
+      T     #lcYear; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_00f: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcMonth; 
+      L     12; 
+      >I    ; 
+      )     ; 
+      JNB   _010; 
+      L     12; 
+      T     #lcMonth; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_010: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcMonth; 
+      L     1; 
+      <I    ; 
+      )     ; 
+      JNB   _011; 
+      L     1; 
+      T     #lcMonth; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_011: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcDay; 
+      L     31; 
+      >I    ; 
+      )     ; 
+      JNB   _012; 
+      L     31; 
+      T     #lcDay; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_012: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcDay; 
+      L     1; 
+      <I    ; 
+      )     ; 
+      JNB   _013; 
+      L     1; 
+      T     #lcDay; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_013: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcSec; 
+      L     60; 
+      >I    ; 
+      )     ; 
+      JNB   _014; 
+      L     60; 
+      T     #lcSec; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_014: A     BR; 
+      )     ; 
+      O(    ; 
+      A(    ; 
+      L     #lcSec; 
+      L     0; 
+      <I    ; 
+      )     ; 
+      JNB   _015; 
+      L     0; 
+      T     #lcSec; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_015: A     BR; 
+      )     ; 
+      =     #dummyBool; 
+NETWORK
+TITLE =Формируем декущую дату
+
+      LAR2  P##lDT; 
+      L     #lcYear; 
+      ITB   ; 
+      T     B [AR2,P#0.0]; 
+
+      L     #lcMonth; 
+      ITB   ; 
+      T     B [AR2,P#1.0]; 
+
+      L     #lcDay; 
+      ITB   ; 
+      T     B [AR2,P#2.0]; 
+
+
+
+NETWORK
+TITLE =Вычислени кол-ва дней с 01.01.1980
+//ПЧ для синхронизации даты требует кол-во дней с 01.01.1980.
+//Siemens DT содержит даты c 01.01.1990. Между этими датами 3653  дня + 1 
+//неполный.
+//
+      A(    ; 
+      A(    ; 
+      CALL "DT_DATE" (
+           IN                       := #lDT,
+           RET_VAL                  := #lDaysD);
+      A     BR; 
+      )     ; 
+      JNB   _016; 
+      L     #lDaysD; 
+      T     #dummyInt; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_016: A     BR; 
+      )     ; 
+      JNB   _017; 
+      L     #dummyInt; 
+      L     3654; 
+      +I    ; 
+      T     #lDays; 
+_017: NOP   0; 
+NETWORK
+TITLE =Расчёт колличества минут с начала суток 
+
+      A(    ; 
+      A(    ; 
+      L     #lcHour; 
+      L     60; 
+      *I    ; 
+      T     #dummyInt; 
+      AN    OV; 
+      SAVE  ; 
+      CLR   ; 
+      A     BR; 
+      )     ; 
+      JNB   _018; 
+      L     #dummyInt; 
+      L     #lcMin; 
+      +I    ; 
+      T     #lMinInDay; 
+      AN    OV; 
+      SAVE  ; 
+      CLR   ; 
+_018: A     BR; 
+      )     ; 
+      JNB   _019; 
+      L     #lcSec; 
+      L     1000; 
+      *I    ; 
+      T     #lcmSec; 
+_019: NOP   0; 
+NETWORK
+TITLE =Вычисление адреса обмена
+//Адрес QW = (№ PZD слова -1) * 2 + OUTREF и если ProfiBus + 8 байт ацикличного 
+//обмена 
+//PKW
+      O(    ; 
+      A(    ; 
+      A(    ; 
+      L     #lNumPZD; 
+      L     1; 
+      -I    ; 
+      T     #dummyInt; 
+      AN    OV; 
+      SAVE  ; 
+      CLR   ; 
+      A     BR; 
+      )     ; 
+      JNB   _01a; 
+      L     #dummyInt; 
+      L     2; 
+      *I    ; 
+      T     #dummyInt; 
+      AN    OV; 
+      SAVE  ; 
+      CLR   ; 
+_01a: A     BR; 
+      )     ; 
+      JNB   _01b; 
+      L     #OUTREF; 
+      L     #dummyInt; 
+      +I    ; 
+      T     #lOUTREF; 
+      AN    OV; 
+      SAVE  ; 
+      CLR   ; 
+_01b: A     BR; 
+      )     ; 
+      O(    ; 
+      A     #PB_Mode; 
+      JNB   _01c; 
+      L     #lOUTREF; 
+      L     8; 
+      +I    ; 
+      T     #lOUTREF; 
+      AN    OV; 
+      SAVE  ; 
+      CLR   ; 
+_01c: A     BR; 
+      )     ; 
+      =     #dummyBool; 
+NETWORK
+TITLE =Запись времени в QW область обмена с ПЧ
+// 
+//Если TestMode (без записй в Q память) то переход на конец нетворка
+      A     #test_Mode; 
+      JC    _9E; 
+//Создали указатель на адрес обмена и загрузили в адресный регистр
+      L     #lOUTREF; 
+      SLD   3; 
+      LAR1  ; 
+//Запись колличества дней с 01.01.1980 в QW
+      L     #lDays; 
+      T     QW [AR1,P#0.0]; 
+
+//Запись колличества минут с начала суток в QW
+      L     #lMinInDay; 
+      T     QW [AR1,P#2.0]; 
+
+//Запись колличества мили секунд с начала минуты QW
+      L     #lcmSec; 
+      T     QW [AR1,P#4.0]; 
+
+
+
+_9E:  NOP   0; 
+NETWORK
+TITLE =Обновление выходов FC
+
+      A(    ; 
+      A(    ; 
+      L     #lDays; 
+      T     #DAYS; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+      A     BR; 
+      )     ; 
+      JNB   _01d; 
+      L     #lMinInDay; 
+      T     #MIN; 
+      SET   ; 
+      SAVE  ; 
+      CLR   ; 
+_01d: A     BR; 
+      )     ; 
+      JNB   _01e; 
+      L     #lOUTREF; 
+      T     #ADDR; 
+_01e: NOP   0; 
+END_FUNCTION
+
